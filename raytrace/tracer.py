@@ -23,7 +23,7 @@ from enthought.traits.api import HasTraits, Array, Float, Complex,\
 from enthought.traits.ui.api import View, Item, ListEditor, VSplit,\
             RangeEditor, ScrubberEditor, HSplit, VGroup, TextEditor,\
             TupleEditor, VGroup, HGroup, TreeEditor, TreeNode, TitleEditor,\
-            ShellEditor
+            ShellEditor, Controller
             
 from enthought.traits.ui.file_dialog import save_file
             
@@ -45,6 +45,10 @@ from raytrace.utils import normaliseVector, transformNormals, transformPoints,\
 
 
 counter = count()
+    
+    
+class RayTraceModelHandler(Controller):
+    pass
     
     
 class RayTraceModel(HasQueue):
@@ -220,7 +224,7 @@ class RayTraceModel(HasQueue):
                 ar = ar[mask]
                 
             rays = children
-            traces_rays.append(rays)
+            traces_rays.append(rays)   # !!! is this supposed to be traced_rays?
         return traced_rays
         
     def trace_segment(self, rays, optics):
@@ -256,6 +260,11 @@ class RayTraceModel(HasQueue):
         
         face_mask = ((f, and_finite(faces==f)) for f in set(faces))
         face_mask = (a for a in face_mask if a[1].any())
+        
+        #tell the input rays which faces terminate each ray
+        #If a ray has no intersection, the end_face is None
+        faces[numpy.logical_not(mask)] = None
+        rays.end_face = faces
         
         children = filter(None,[f.eval_children(rays, points, m) for f,m in face_mask])
         if len(children)==0:
@@ -306,11 +315,17 @@ class RayTraceModel(HasQueue):
             source.on_trait_change(self.trace_all, "update")
             source.on_trait_change(self.render_vtk, "render")
         self.trace_all()
+    
+    
+#use a singleton handler
+controller = RayTraceModelHandler()
+    
         
-        
-def on_dclick(obj):
-    obj.edit_traits(kind="live")
-        
+def on_dclick(*obj):
+    print "objects", obj
+    obj[0].edit_traits(kind="live", parent=controller.info.ui.control)
+    
+    
         
 tree_editor = TreeEditor(
                 nodes=[
@@ -386,12 +401,17 @@ tree_editor = TreeEditor(
                         auto_open=False,
                         label="name",
                         ),
+                       TreeNode(
+                        node_for=[Result],
+                        children='',
+                        auto_open=False,
+                        label="name",
+                        ),
                        ],
                 orientation='vertical',
                 hide_root=True,
-                on_dclick=on_dclick
+                on_dclick=on_dclick,
                 )
-        
     
 ray_tracer_view = View(
                    HSplit(
@@ -417,7 +437,8 @@ ray_tracer_view = View(
                    resizable=True,
                    #height=500,
                    width=800,
-                   id="raytrace.view"
+                   id="raytrace.view",
+                   handler=controller
                    )
     
 RayTraceModel.class_trait_view("traits_view", ray_tracer_view)
