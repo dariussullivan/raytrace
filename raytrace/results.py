@@ -2,9 +2,6 @@
 A module for Results subclasses
 """
 
-import sys
-sys.path.append('..')
-
 
 from enthought.traits.api import Instance, Float, on_trait_change,\
             Button, DictStrFloat
