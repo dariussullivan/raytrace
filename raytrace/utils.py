@@ -17,8 +17,10 @@
 
 import numpy
 from enthought.tvtk.api import tvtk
-from enthought.traits.api import Range as _Range, Tuple as _Tuple
+from enthought.traits.api import Range as _Range, Tuple as _Tuple,\
+            BaseTuple
 from enthought.traits.ui.api import TupleEditor
+
 
 class EditorTraits(object):
     def get_editor(self, *args, **kwds):
@@ -38,8 +40,20 @@ class Range(EditorTraits, _Range):
 class Tuple(EditorTraits, _Tuple):
     pass
 
+
+class UnitVectorTrait(EditorTraits, BaseTuple):
+    def validate(self, object, name, value):
+        value = super(UnitVectorTrait, self).validate(object,name,value)
+        mag = numpy.sqrt(sum(a**2 for a in value))
+        return tuple(float(a/mag) for a in value)
+
+
 TupleVector = Tuple((0.,0.,0.), editor_traits={'cols':3,
                                              'labels':['x','y','z']})
+                                             
+UnitTupleVector = UnitVectorTrait((0.,0.,1.), editor_traits={'cols':3,
+                                             'labels':['x','y','z']})
+
 
 def normaliseVector(a):
     """normalise a (3,) vector or a (n,3) array of vectors"""
@@ -93,3 +107,13 @@ def Convert_to_SP(input_v, normal_v, E1_vector, E1_amp, E2_amp):
     P_amp = E1_amp*dotprod(E1_vector,P_vector) + E2_amp*dotprod(E2_vector, P_vector)
     
     return S_amp, P_amp, S_vector, P_vector
+
+def rotation(theta):
+   tx=ty=tz = theta
+   cos = numpy.cos
+   sin = numpy.sin
+   Rx = numpy.array([[1,0,0], [0, cos(tx), -sin(tx)], [0, sin(tx), cos(tx)]])
+   Ry = numpy.array([[cos(ty), 0, -sin(ty)], [0, 1, 0], [sin(ty), 0, cos(ty)]])
+   Rz = numpy.array([[cos(tz), -sin(tz), 0], [sin(tz), cos(tz), 0], [0,0,1]])
+
+   return numpy.dot(Rx, numpy.dot(Ry, Rz))

@@ -28,26 +28,32 @@ from enthought.traits.ui.api import View, Item, Tabbed, VGroup, Include, \
 
 from enthought.tvtk.api import tvtk
 
-from raytrace.rays import RayCollection
-from raytrace.utils import normaliseVector, Range, TupleVector, Tuple
-from raytrace.bases import Renderable
+from raytrace.ctracer import RayCollection, Ray, ray_dtype
+from raytrace.utils import normaliseVector, Range, TupleVector, Tuple, \
+            UnitTupleVector, UnitVectorTrait
+from raytrace.bases import Renderable, RaytraceObject
 
 Vector = Array(shape=(3,))
 
 
+class BaseBase(HasTraits, RaytraceObject):
+    pass
 
-class BaseRaySource(HasTraits):
+
+class BaseRaySource(BaseBase):
+    abstract=True
+    subclasses = set()
     name = Title("Ray Source")
     update = Event()
     display = Enum("pipes", "wires", "hidden")
     render = Event()
-    mapper = Instance(tvtk.PolyDataMapper, ())
+    mapper = Instance(tvtk.PolyDataMapper, (), transient=True)
     
     InputRays = Property(Instance(RayCollection), depends_on="max_ray_len")
-    TracedRays = List(RayCollection)
+    TracedRays = List(RayCollection, transient=True)
     
     InputDetailRays = Property(Instance(RayCollection), depends_on="InputRays")
-    TracedDetailRays = List(RayCollection)
+    TracedDetailRays = List(RayCollection, transient=True)
 
     detail_resolution = Int(32)
 
@@ -61,7 +67,8 @@ class BaseRaySource(HasTraits):
     show_normals = Bool(False)
     
     #idx selector for the input ways which should be visualised
-    view_ray_ids = Trait(None, Array(dtype=numpy.int))
+    #making this transient because pyYAML fails to serialise arrays
+    view_ray_ids = Trait(None, Array(dtype=numpy.int), transient=True)
     
     tube = Instance(tvtk.TubeFilter, (), transient=True)
     sphere = Instance(tvtk.SphereSource, (), transient=True)
@@ -122,7 +129,51 @@ class BaseRaySource(HasTraits):
             parent = rays.parent
         seq.reverse()
         return seq
-    
+
+
+    def get_ray_list_by_id(self):
+        """return a list of lists of dictionaries where the index of the outer list is the ray id (defined by order encountered)
+        , and the inner index is the recursion # backwards (0 being the ray that dies, 1 is its parent, and so on) 
+        and the dictionary keys are the attributes of the ray object"""
+        result = []
+        #keys is copy and pasted from the dtype of a ray object
+        keys = ['origin','direction','normal','E_vector','refractive_index','E1_amp','E2_amp','length','wavelength','parent_idx','end_face_idx']
+        #start at the last ray collection and work backwards
+        temp = list(self.TracedRays)    #otherwise its a TraitListObject
+        raycollections = []             #make data a list of lists of lists
+        for raycollection in temp:
+            tmp = []
+            for x in raycollection.copy_as_array():
+                tmp.append(list(x))
+            raycollections.append(tmp)
+
+        length = len(raycollections)-1
+
+        for i,collection in enumerate(reversed(raycollections)):
+            for ray in collection:
+                if ray:                  #rays already accounted for are set to none
+                    lst = []             #list to contain all relevant dictionaries for each ray
+                    r = {}               #the first dictionary
+                    for x,att in enumerate(ray):
+                        r[keys[x]] = att 
+                    lst.append(r)
+                    cntr = length-i
+                    cntr -= 1
+                    parent_idx = r['parent_idx']
+                    while cntr >= 0:     #iterate back through the ray collections
+                        r = {}          #and repeat what we did for the first ray
+                        arr = raycollections[cntr][parent_idx]
+                        for x,att in enumerate(arr):
+                            r[keys[x]] = att 
+                        lst.append(r.copy())
+                        raycollections[cntr][parent_idx] = None     #mark this ray done
+                        cntr -= 1
+                        parent_idx = r['parent_idx']
+                    result.append(lst)
+
+        
+        return result
+
     def eval_angular_spread(self, idx):
         """A helper method to evaluate the angular spread of a ray-segment.
         @param idx: the index of the RayCollection in the TracedRay list 
@@ -191,22 +242,12 @@ class BaseRaySource(HasTraits):
         source = tvtk.ProgrammableSource()
         def execute():
             output = source.poly_data_output
-            
             pointArrayList = []
-            for rays in self.TracedRays:
-                try:
-                    id_mask = numpy.setmember1d(rays.parent_ids, ids)
-                except (NameError, AttributeError):
-                    id_mask = numpy.zeros(rays.length.shape[0], dtype=numpy.bool)
-                    view_ray_ids = self.view_ray_ids
-                    if view_ray_ids is not None:
-                        id_mask[self.view_ray_ids] = True
-                    else:
-                        id_mask[:] = True
-                
-                start_pos = rays.origin[id_mask]
-                end_pos = rays.termination[id_mask]
-                ids = numpy.argwhere(id_mask)[:,0]
+            for rays in self.TracedRays:                
+                start_pos = [r.origin for r in rays]
+                end_pos = [r.termination for r in rays]
+                #print "start", start_pos
+                #print "end", end_pos
                 interleaved = numpy.array([start_pos, end_pos]).swapaxes(0,1).reshape(-1,3)
                 pointArrayList.append(interleaved)
             if pointArrayList:
@@ -258,14 +299,18 @@ class BaseRaySource(HasTraits):
     
 class ParallelRaySource(BaseRaySource):
     origin = Tuple((0.,0.,0.))
-    direction = Tuple((0.,0.,1.))
+    direction = UnitTupleVector
     number = Int(20)
     radius = Float(10.)
+    rings = Range(1,50,3, editor_traits={'mode':'spinner'})
+    E_vector = UnitVectorTrait((1.,0.,0.), editor_traits={'cols':3,
+                                'labels':['x','y','z']})
+
     
     view_ray_ids = numpy.arange(20)
     
     InputRays = Property(Instance(RayCollection), 
-                         depends_on="origin, direction, number, radius, max_ray_len")
+                         depends_on="origin, direction, number, rings, radius, max_ray_len")
     
     geom_grp = VGroup(Group(Item('origin', show_label=False,resizable=True), 
                             show_border=True,
@@ -275,12 +320,12 @@ class ParallelRaySource(BaseRaySource):
                             show_border=True,
                             label="Direction"),
                        Item('number'),
-                       #Item('rings'),
+                       Item('rings'),
                        Item('radius'),
                        label="Geometry")
     
     
-    @on_trait_change("focus, direction, number, radius, max_ray_len")
+    @on_trait_change("focus, direction, number, rings, radius, max_ray_len")
     def on_update(self):
         self.data_source.modified()
         self.update=True
@@ -290,8 +335,8 @@ class ParallelRaySource(BaseRaySource):
         origin = numpy.array(self.origin)
         direction = numpy.array(self.direction)
         count = self.number
+        rings = self.rings
         radius = self.radius
-        
         max_axis = numpy.abs(direction).argmax()
         if max_axis==0:
             v = numpy.array([0.,1.,0.])
@@ -301,33 +346,125 @@ class ParallelRaySource(BaseRaySource):
         d1 = normaliseVector(d1)
         d2 = numpy.cross(direction, d1)
         d2 = normaliseVector(d2)
-        angles = (i*2*numpy.pi/count for i in xrange(count))
-        offsets = [radius*(d1*numpy.sin(a) + d2*numpy.cos(a)) for a in angles]
+
+        ray_data = numpy.zeros((rings*count)+1, dtype=ray_dtype)
         
-        origins = numpy.array([origin + offset for offset in offsets])
-        directions = numpy.ones_like(origins) * direction
-        rays = RayCollection(origin=origins, direction=directions,
-                             max_length=self.max_ray_len)
-        rays.set_polarisation(1, 0, 0)
-        size = origins.shape[0],1
-        rays.E1_amp = numpy.ones(size, dtype=numpy.complex128)
-        rays.E2_amp = numpy.zeros(size, dtype=numpy.complex128)
-        rays.refractive_index = numpy.ones(size, dtype=numpy.complex128)
-        rays.offset_length = numpy.zeros_like(rays.length)
-        rays.normals = numpy.zeros_like(origins)
-        rays.normals[:,1]=1.0
+        radii = ((numpy.arange(rings)+1)*(radius/rings))[:,None,None]
+        angles = (numpy.arange(count)*(2*numpy.pi/count))[None,:,None]
+        offsets = radii*(d1*numpy.sin(angles) + d2*numpy.cos(angles)) 
+        offsets.shape = (-1,3)
+        
+        E_vector = numpy.cross(self.E_vector, direction)
+        E_vector = numpy.cross(E_vector, direction)
+
+        ray_data['origin'][1:] = offsets
+        ray_data['origin'] += origin
+        ray_data['direction'] = direction
+        ray_data['E_vector'] = [normaliseVector(E_vector)]
+        ray_data['E1_amp'] = 1.0 + 0.0j
+        ray_data['E2_amp'] = 0.0
+        ray_data['refractive_index'] = 1.0+0.0j
+        ray_data['normal'] = [[0,1,0]]
+        rays = RayCollection.from_array(ray_data)
         return rays
     
+class RectRaySource(BaseRaySource):
+    """ rays from a rectangular aperture """ 
+    origin = Tuple((0.,0.,0.))
+    direction = UnitTupleVector
+    number = Int(20)		#total rays is n^2
+    length = Float(10.)
+    width = Float(10)
+    rings = Range(1,50,3, editor_traits={'mode':'spinner'})
+    theta = Float(0.)
+    randomness = Bool(False)
+    
+    view_ray_ids = numpy.arange(20)
+    
+    InputRays = Property(Instance(RayCollection), 
+                         depends_on="origin, direction, number, length, width, theta, max_ray_len")
+    
+    geom_grp = VGroup(Group(Item('origin', show_label=False,resizable=True), 
+                            show_border=True,
+                            label="Origin position",
+                            padding=0),
+                       Group(Item('direction', show_label=False, resizable=True),
+                            show_border=True,
+                            label="Direction"),
+                       Item('number'),
+                       Item('length'),
+                       Item('width'),
+                       Item('theta'),
+		       Item('randomness'),
+                       label="Geometry")
+    
+    
+    @on_trait_change("focus, direction, number, length, width, theta, max_ray_len")
+    def on_update(self):
+        self.data_source.modified()
+        self.update=True
+    
+    @cached_property
+    def _get_InputRays(self):
+        from utils import rotation
+        origin = numpy.array(self.origin)
+        direction = numpy.array(self.direction)
+        count = self.number
+        length = self.length
+        width = self.width
+        randomness = self.randomness
+        max_axis = numpy.abs(direction).argmax()
+        if max_axis==0:
+            v = numpy.array([0.,1.,0.])
+        else:
+            v = numpy.array([1.,0.,0.])
+        d1 = numpy.cross(direction, v)
+        d1 = normaliseVector(d1)
+        d2 = numpy.cross(direction, d1)
+        d2 = normaliseVector(d2)
+        a = length/2
+        b = width/2
+        X_range = numpy.linspace(-a, a, count)
+        Y_range = numpy.linspace(-b, b, count)
+
+	ray_data = numpy.zeros(count**2, dtype=ray_dtype)
+	offsets = numpy.zeros([X_range.size*Y_range.size,3])
+        
+        for i,x in enumerate(X_range):
+            for j,y in enumerate(Y_range):
+                if randomness:
+		    from random import uniform
+                    x = x + uniform(-a/count, a/count)
+                    y = y + uniform(-b/count, b/count)
+                point = d1 * x + d2 * y
+                block = i * Y_range.size
+                offsets[block + j] = point
+        
+        origins = numpy.array([origin + offset for offset in offsets])
+        
+        dirmatrix = numpy.matrix(direction)
+        raydir = rotation(numpy.radians(self.theta))*(dirmatrix.T)
+        directions = numpy.ones_like(origins) * numpy.array(raydir.T)
+
+        ray_data['origin'] = origins
+        ray_data['direction'] = directions
+        ray_data['E_vector'] = [[1,0,0]]
+        ray_data['E1_amp'] = 1.0 + 0.0j
+        ray_data['E2_amp'] = 0.0
+        ray_data['refractive_index'] = 1.0+0.0j
+        ray_data['normal'] = [[0,1,0]]
+        rays = RayCollection.from_array(ray_data)
+        return rays
     
 
 class ConfocalRaySource(BaseRaySource):
     focus = TupleVector
-    direction = TupleVector
+    direction = UnitTupleVector
     number = Range(1,50,20, editor_traits={'mode':'spinner'})
     theta = Range(0.0,90.0,value=30)
     working_dist = Float(100.0)
     rings = Range(1,50,3, editor_traits={'mode':'spinner'})
-    
+    reverse = -1    #-1 is converging, +1 is diverging
     principle_axes = Property(Tuple(Array,Array), depends_on="direction")
     
     #view_ray_ids = numpy.arange(20)
@@ -369,38 +506,35 @@ class ConfocalRaySource(BaseRaySource):
     
     @cached_property
     def _get_InputRays(self):
+        rev = self.reverse #to determine converging or diverging  
         focus = numpy.array(self.focus)
         direction = numpy.array(self.direction)
         working_dist = self.working_dist
-        origin = focus - direction*working_dist
+        origin = focus - rev*direction*working_dist
         count = self.number
         rings = self.rings
         theta = self.theta
         radius = numpy.tan(numpy.pi * theta/180) * working_dist
         
         d1, d2 = self.principle_axes
+        ray_data = numpy.zeros((rings*count)+1, dtype=ray_dtype)
         
-        radii = [(i+1)*radius/rings for i in xrange(rings)]
-        angles = [i*2*numpy.pi/count for i in xrange(count)]
-        offsets = [r*(d1*numpy.sin(a) + d2*numpy.cos(a)) 
-                   for a in angles
-                   for r in radii]
-        
-        origins = numpy.array([origin] + 
-                              [origin + offset for offset in offsets])
-        directions = normaliseVector([direction] + 
-                                     [direction*working_dist - offset 
-                                      for offset in offsets])
-        rays = RayCollection(origin=origins, direction=directions,
-                             max_length=self.max_ray_len)
-        rays.set_polarisation(1, 0, 0)
-        size = origins.shape[0],1
-        rays.E1_amp = numpy.ones(size, dtype=numpy.complex128)
-        rays.E2_amp = numpy.zeros(size, dtype=numpy.complex128)
-        rays.refractive_index = numpy.ones(size, dtype=numpy.complex128)
-        rays.offset_length = numpy.sqrt(((origins - focus)**2).sum(axis=-1)).reshape(-1,1)
-        rays.normals = numpy.zeros_like(origins)
-        rays.normals[:,1]=1.0
+        radii = ((numpy.arange(rings)+1)*(radius/rings))[:,None,None]
+        angles = (numpy.arange(count)*(2*numpy.pi/count))[None,:,None]
+        offsets = radii*(d1*numpy.sin(angles) + d2*numpy.cos(angles)) 
+        offsets.shape = (-1,3)
+
+        ray_data['origin'][1:] = offsets
+        ray_data['origin'] += origin
+        ray_data['direction'][0] = normaliseVector(rev*direction)
+        ray_data['direction'][1:] = normaliseVector((rev*direction*working_dist) - offsets)
+        ray_data['length'] = self.max_ray_len
+        ray_data['E_vector'] = [1,0,0]
+        ray_data['E1_amp'] = 1.0 + 0.0j
+        ray_data['E2_amp'] = 0.0
+        ray_data['refractive_index'] = 1.0
+        ray_data['normal'] = [0,1,0]
+        rays = RayCollection.from_array(ray_data)
         return rays
     
     @cached_property

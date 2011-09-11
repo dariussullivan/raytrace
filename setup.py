@@ -15,16 +15,49 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import ez_setup
-ez_setup.use_setuptools()
-from setuptools import setup, find_packages
+import distribute_setup
+distribute_setup.use_setuptools()
+from setuptools import find_packages, setup
+#from distutils.core import setup
+from distutils.extension import Extension
+from Cython.Distutils import build_ext
+#from setuptools import find_packages
+
+###Cython.Distutils and Distribute don't play nice so we'll create the
+###C-modules explicitly
+import subprocess, os
+
+def create_module(pyx_name):
+    cname = os.path.splitext(pyx_name)[0] + ".c"
+    if os.path.exists(cname) and \
+        os.stat(cname).st_mtime > os.stat(pyx_name).st_mtime:
+        return
+    ret = subprocess.call(['cython',pyx_name])
+    if ret < 0:
+        raise CythonError("Failed to compile %s with Cython"%pyx_name)
+
+for fname in ['ctracer.pyx','cfaces.pyx','cmaterials.pyx']:
+    create_module("raytrace/%s"%fname)
+    
+import numpy
+np_include = numpy.get_include()
+
+ext_modules=[Extension("ctracer", ["raytrace/ctracer.pyx"],
+                        include_dirs=[np_include]),
+            Extension("cfaces", ["raytrace/cfaces.pyx"],
+                        include_dirs=[np_include]),
+            Extension("cmaterials", ["raytrace/cmaterials.pyx"],
+                        include_dirs=[np_include])
+            ]
 
 setup(
     name="raytrace",
     version="0.1dev",
     packages=find_packages(),
     scripts = [], #no stand-alone application yet
-    
+    cmdclass = {'build_ext': build_ext},
+    ext_package = "raytrace",
+    ext_modules = ext_modules,
     zip_safe = True, #why not!
     
     install_requires = ["numpy >= 1.1",

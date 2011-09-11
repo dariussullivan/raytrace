@@ -388,10 +388,10 @@ class TroughParabloid(BaseMirror):
         #create the 2d profile of parabolic trough
         size = 20
         x = numpy.linspace(xmin, xmax, size)
-        z = a * (x**2) -self.EFL*self.EFL_centre
+        z = a * (x**2) -self.EFL
         #this is a 2d profile but Y-coord sets the starting plane from 
         #which the extrusion extends from
-        y = numpy.ones_like(x) * (-self.length/2.)
+        y = numpy.ones_like(x) * (self.length/2.)
     
         points = numpy.array([x,y,z]).T 
         cells = [[i,i+1] for i in xrange(size-1)]
@@ -479,9 +479,7 @@ class RectMirror(BaseMirror):
         #create the 2d profile, just a line.
         x = numpy.array([xmin, xmax])
         z = numpy.zeros_like(x)
-        #this is a 2d profile but Y-coord sets the starting plane from 
-        #which the extrusion extends from
-        y = numpy.ones_like(x) * (-self.length/2.)
+        y = numpy.ones_like(x)*(self.length/2.)         #this is a 2d profile.  so, no Y
     
         points = numpy.array([x,y,z]).T 
         print points

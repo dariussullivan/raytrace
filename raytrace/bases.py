@@ -16,10 +16,10 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-from enthought.traits.api import HasTraits, Array, Float, Complex,\
+from enthought.traits.api import HasTraits, Array, BaseFloat, Complex,\
             Property, List, Instance, Range, Any,\
             Tuple, Event, cached_property, Set, Int, Trait, Button,\
-            self, Str, Bool, PythonValue, Enum
+            self, Str, Bool, PythonValue, Enum, MetaHasTraits
 from enthought.traits.ui.api import View, Item, ListEditor, VSplit,\
             RangeEditor, ScrubberEditor, HSplit, VGroup, TextEditor,\
             TupleEditor, VGroup, HGroup, TreeEditor, TreeNode, TitleEditor,\
@@ -32,12 +32,14 @@ import numpy
 import threading, os, itertools
 import wx
 from itertools import chain, izip, islice, count
+import yaml
 from raytrace.rays import RayCollection, collectRays
 from raytrace.constraints import BaseConstraint
 from raytrace.has_queue import HasQueue, on_trait_change
 from raytrace.faces import Face
 from raytrace.utils import normaliseVector, transformNormals, transformPoints,\
         transformVectors, dotprod
+from raytrace import ctracer, cmaterials
 
 Vector = Array(shape=(3,))
 
@@ -50,13 +52,73 @@ VectorEditor = TupleEditor(labels=['x','y','z'], auto_set=False, enter_set=True)
 
 counter = count()
 
+
+class Float(BaseFloat):
+    def validate(self, obj, name, value):
+        return float(value)
+
+
+class RaytraceObjectMetaclass(MetaHasTraits):
+    """
+    The metaclass for YAMLObject.
+    """
+    def __init__(cls, name, bases, kwds):
+        super(RaytraceObjectMetaclass, cls).__init__(name, bases, kwds)
+        if 'yaml_tag' in kwds and kwds['yaml_tag'] is not None:
+            pass
+        else:
+            cls.yaml_tag = "!"+name
+        cls.yaml_loader.add_constructor(cls.yaml_tag, cls.from_yaml)
+        cls.yaml_dumper.add_representer(cls, cls.to_yaml)
+        
+        if not kwds.get('abstract', False):
+            cls.subclasses.add(cls)
+
+
+class RaytraceObject(object):
+    """
+    An object that can dump itself to a YAML stream
+    and load itself from a YAML stream.
+    """
+
+    __metaclass__ = RaytraceObjectMetaclass
+    __slots__ = ()  # no direct instantiation, so allow immutable subclasses
+
+    yaml_loader = yaml.Loader
+    yaml_dumper = yaml.Dumper
+
+    yaml_tag = None
+    yaml_flow_style = None
+    
+    abstract = True
+    subclasses = set()
+
+    def from_yaml(cls, loader, node):
+        """
+        Convert a representation node to a Python object.
+        """
+        return loader.construct_yaml_object(node, cls)
+    from_yaml = classmethod(from_yaml)
+
+    def to_yaml(cls, dumper, data):
+        """
+        Convert a Python object to a representation node.
+        """
+        return dumper.represent_yaml_object(cls.yaml_tag, data, cls,
+                flow_style=cls.yaml_flow_style)
+    to_yaml = classmethod(to_yaml)
+
+
+
+
 class Direction(HasTraits):
     x = Float
     y = Float
     z = Float
 
 
-class Renderable(HasQueue):
+class Renderable(HasQueue, RaytraceObject):
+    __metaclass__ = RaytraceObjectMetaclass
     display = Enum("shaded", "wireframe", "hidden")
     
     actors = Instance(tvtk.ActorCollection, (), transient=True)
@@ -85,10 +147,12 @@ class ModelObject(Renderable):
     
     centre = Tuple(0.,0.,0.) #position
     
-    _orientation = Tuple(float, float)
+    _orientation = Tuple(Float, Float)
     
-    orientation = Property(Range(-180.0,180.0), depends_on="_orientation")
-    elevation = Property(Range(-180.,180.), depends_on="_orientation")
+    orientation = Property(Range(-180.0,180.0), transient=True,
+                           depends_on="_orientation")
+    elevation = Property(Range(-180.,180.), transient=True,
+                         depends_on="_orientation")
     
     rotation = Range(-180.0,180.0, value=0.0) #rotation around orientation axis
     
@@ -179,9 +243,12 @@ class Traceable(ModelObject):
 
     update = Event() #request re-tracing
     
-    intersections = List([])
+    intersections = List([], transient=True)
     
-    faces = List(Face, desc="list of traceable faces (Face instances)",
+    material = Instance(ctracer.InterfaceMaterial)
+    
+    faces = Instance(ctracer.FaceList, 
+                desc="Container of traceable faces (Face instances)",
                  transient = True)
     
     #all Traceables have a pipeline to generate a VTK visualisation of themselves
@@ -189,9 +256,8 @@ class Traceable(ModelObject):
     
     polydata = Property(depends_on=['update', ])
     
-    def _faces_changed(self, vnew):
-        for face in vnew:
-            face.transform = self.tranform
+    abstract=True
+    subclasses = set()
     
     def _actors_default(self):
         pipeline = self.pipeline
@@ -298,6 +364,7 @@ Traceable.uigroup = VGroup(
 
     
 class Optic(Traceable):
+    abstract=True
     n_inside = Complex(1.0+0.0j) #refractive
     n_outside = Complex(1.0+0.0j)
     
@@ -305,6 +372,11 @@ class Optic(Traceable):
     
     vtkproperty = tvtk.Property(opacity = 0.4,
                              color = (0.8,0.8,1.0))
+                             
+    def _material_default(self):
+        m = cmaterials.DielectricMaterial(n_inside = self.n_inside,
+                                    n_outside = self.n_outside)
+        return m
     
     def calc_refractive_index(self, wavelengths):
         """
@@ -320,150 +392,14 @@ class Optic(Traceable):
     
     @on_trait_change("n_inside, n_outside")
     def n_changed(self):
+        self.material.n_inside = self.n_inside
+        self.material.n_outside = self.n_outside
         self.update = True
-    
-### The following functions have been moved to the Face subclasses
-#
-#    def compute_normal(self, points, cell_ids):
-#        """
-#        Evaluate the surface normal in the world frame-of-reference
-#        @param points: flaot64 ndarray of shape (n,3) giving intersection points
-#        @param cell_ids: Int ndaray of shape (n,) with cell ids
-#        """
-#        raise NotImplementedError
-#    
-#    def eval_children(self, rays, points, cells, mask=slice(None,None,None)):
-#        """
-#        actually calculates the new ray-segments. Physics here
-#        for Fresnel reflections.
-#        
-#        rays - a RayCollection object
-#        points - a (Nx3) array of intersection coordinates
-#        cells - a length N array of cell ids (a.k.a. face ids), or an int
-#        mask - a bool array selecting items for this Optic
-#        """
-#        raise Exception("depreciated!")
-#        points = points[mask]
-#        if isinstance(cells, int):
-#            normal = self.compute_normal(points, cells)
-#            cells = numpy.ones(points.shape[0], numpy.int) * cells
-#        else:
-#            cells = cells[mask] ###reshape not necessary
-#            normal = self.compute_normal(points, cells)
-#        input_v = rays.direction[mask]
-#        
-#        parent_ids = numpy.arange(mask.shape[0])[mask]
-#        optic = numpy.repeat([self,], points.shape[0] )
-#        
-#        S_amp, P_amp, S_vec, P_vec = Convert_to_SP(input_v, 
-#                                                   normal, 
-#                                                   rays.E_vector[mask], 
-#                                                   rays.E1_amp[mask], 
-#                                                   rays.E2_amp[mask])
-#
-#        #this is cos(theta), where theta is the angle between the
-#        #normal and the incident ray
-#        cosTheta = dotprod(normal, input_v)
-#        
-#        origin = points
-#            
-#        fromoutside = cosTheta < 0
-#        n1 = numpy.where(fromoutside, self.n_outside.real, self.n_inside.real)
-#        n2 = numpy.where(fromoutside, self.n_inside.real, self.n_outside.real)
-#        flip = numpy.where(fromoutside, 1, -1)
-#            
-#        abscosTheta = numpy.abs(cosTheta)
-#        
-#        N2 = (n2/n1)**2
-#        N2cosTheta = N2*abscosTheta
-#        
-#        #if this is less than zero, we have Total Internal Reflection
-#        N2_sin2 = abscosTheta**2 + (N2 - 1)
-#        
-#        TIR = N2_sin2 < 0.0
-#        sqrt = numpy.sqrt
-#        
-#        cosThetaNormal = cosTheta*normal
-#        reflected = input_v - 2*cosThetaNormal
-#        sqrtN2sin2 = numpy.where(TIR, 1.0j*sqrt(-N2_sin2), sqrt(N2_sin2))
-#        #print "root n2.sin2", sqrtN2sin2
-#        
-#        #Fresnel equations for reflection
-#        R_p = (N2cosTheta - sqrtN2sin2) / (N2cosTheta + sqrtN2sin2)
-#        R_s = (abscosTheta - sqrtN2sin2) / (abscosTheta + sqrtN2sin2)
-#        #print "R_s", R_s, "R_p", R_p
-#        
-#        ###Now calculate transmitted rays
-#        d1 = input_v
-#        tangent = d1 - cosThetaNormal
-#        
-#        tan_mag_sq = ((n1*tangent/n2)**2).sum(axis=1).reshape(-1,1)        
-#        
-#        c2 = numpy.sqrt(1 - tan_mag_sq)
-#        transmitted = tangent*(n1/n2) - c2*normal*flip 
-#        #print d1, normal, tangent, transmitted, "T"
-#        
-#        cos1 = abscosTheta
-#        #cos of angle between outgoing ray and normal
-#        cos2 = abs(dotprod(transmitted, normal))
-#        
-#        Two_n1_cos1 = (2*n1)*cos1
-#        
-#        aspect = sqrt(cos2/cos1) * Two_n1_cos1
-#        
-#        #Fresnel equations for transmission
-#        T_p = aspect / ( n2*cos1 + n1*cos2 )
-#        T_s = aspect / ( n2*cos2 + n1*cos1 )
-#        #print "T_s", T_s, "T_p", T_p
-#        
-#        if self.all_rays:
-#            refl_rays = RayCollection(origin=origin,
-#                                       direction = reflected,
-#                                       max_length = rays.max_length,
-#                                       E_vector = S_vec,
-#                                       E1_amp = S_amp*R_s,
-#                                       E2_amp = P_amp*R_p,
-#                                       parent_ids = parent_ids,
-#                                       optic = optic,
-#                                       face_id = cells,
-#                                       refractive_index=n1)
-#            
-#            trans_rays = RayCollection(origin=origin,
-#                                       direction = transmitted,
-#                                       max_length = rays.max_length,
-#                                       E_vector = S_vec,
-#                                       E1_amp = S_amp*T_s,
-#                                       E2_amp = P_amp*T_p,
-#                                       parent_ids = parent_ids,
-#                                       optic = optic,
-#                                       face_id = cells,
-#                                       refractive_index=n2)
-#            
-#            allrays = collectRays(refl_rays, trans_rays)
-#            allrays.parent = rays
-#            return allrays
-#        else:
-#            TIR.shape=-1,1
-#            tir = TIR*numpy.ones(3)
-#            direction = numpy.where(tir, reflected,transmitted)
-#            E1_amp = S_amp*numpy.where(TIR, R_s, T_s)
-#            E2_amp = P_amp*numpy.where(TIR, R_p, T_p)
-#            refractive_index = numpy.where(TIR, n1, n2)
-#            
-#            return RayCollection(origin=origin,
-#                               direction = direction,
-#                               max_length = rays.max_length,
-#                               E_vector = S_vec,
-#                               E1_amp = E1_amp,
-#                               E2_amp = E2_amp,
-#                               parent_ids = parent_ids,
-#                               optic = optic,
-#                               face_id = cells,
-#                               refractive_index=refractive_index) 
     
     
 class VTKOptic(Optic):
     """Polygonal optics using a vtkOBBTree to do the ray intersections"""
+    abstract=True
     data_source = Instance(tvtk.ProgrammableSource, (), transient=True)
     
     obb = Instance(tvtk.OBBTree, (), transient=True)
@@ -528,7 +464,9 @@ class VTKOptic(Optic):
         return short[0], short[1], short[2], self
     
     
-class Result(HasTraits):
+class Result(HasTraits, RaytraceObject):
+    abstract=True
+    subclasses = set()
     name = Str("a result")
     
     def calc_result(self, tracer):
